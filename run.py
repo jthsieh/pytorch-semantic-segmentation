@@ -24,6 +24,8 @@ ckpt_path = '/home/luoa/junting/cvpr18/segmentation/ckpt'
 exp_name = 'nyu-fcn32s'
 #writer = SummaryWriter(os.path.join(ckpt_path, 'exp', exp_name))
 
+os.environ['CUDA_VISIBLE_DEVICES'] = "0,1,2,3"
+
 args = {
     'modality': 'rgb',
     'root': '/home/luoa/slowbro/nyu-d2',
@@ -44,6 +46,14 @@ args = EasyDict(args)
 
 num_classes = 40
 #num_classes = 21
+
+def colorize_mask(mask):
+    # mask: numpy array of the mask
+    new_mask = Image.fromarray(mask.astype(np.uint8)).convert('P')
+    new_mask.putpalette(palette)
+
+    return new_mask
+
 
 def main(train_args):
     net = nn.DataParallel(FCN32VGG(num_classes=num_classes).cuda())
@@ -77,9 +87,8 @@ def main(train_args):
     train_loader = get_dataloader(train_args)
     train_args.train = 0
     val_loader = get_dataloader(train_args)
-    exit(0)
 
-    criterion = CrossEntropyLoss2d(size_average=False, ignore_index=voc.ignore_label).cuda()
+    criterion = CrossEntropyLoss2d(size_average=False, ignore_index=-1).cuda()
 
     optimizer = optim.SGD([
         {'params': [param for name, param in net.named_parameters() if name[-4:] == 'bias'],
@@ -112,6 +121,7 @@ def train(train_loader, net, criterion, optimizer, epoch, train_args):
         inputs, labels = data
         print("#################")
         print(inputs.size(), labels.size())
+        print(labels.numpy())
         assert inputs.size()[2:] == labels.size()[1:]
         N = inputs.size(0)
         h, w = labels.size()[1:]
@@ -122,7 +132,7 @@ def train(train_loader, net, criterion, optimizer, epoch, train_args):
         outputs = net(inputs)
         print(outputs.size())
         assert outputs.size()[2:] == labels.size()[1:]
-        assert outputs.size()[1] == voc.num_classes
+        assert outputs.size()[1] == num_classes
 
         loss = criterion(outputs, labels) / N / h / w
         loss.backward()
@@ -163,7 +173,7 @@ def validate(val_loader, net, criterion, optimizer, epoch, train_args, restore, 
         gts_all.append(gts.data.squeeze_(0).cpu().numpy())
         predictions_all.append(predictions)
 
-    acc, acc_cls, mean_iu, fwavacc = evaluate(predictions_all, gts_all, voc.num_classes)
+    acc, acc_cls, mean_iu, fwavacc = evaluate(predictions_all, gts_all, num_classes)
 
     if mean_iu > train_args['best_record']['mean_iu']:
         train_args['best_record']['val_loss'] = val_loss.avg
@@ -187,8 +197,8 @@ def validate(val_loader, net, criterion, optimizer, epoch, train_args, restore, 
             if data[0] is None:
                 continue
             input_pil = restore(data[0])
-            gt_pil = voc.colorize_mask(data[1])
-            predictions_pil = voc.colorize_mask(data[2])
+            gt_pil = colorize_mask(data[1])
+            predictions_pil = colorize_mask(data[2])
             if train_args['val_save_to_img_file']:
                 input_pil.save(os.path.join(to_save_dir, '%d_input.png' % idx))
                 predictions_pil.save(os.path.join(to_save_dir, '%d_prediction.png' % idx))
