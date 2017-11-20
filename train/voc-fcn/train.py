@@ -4,28 +4,30 @@ import random
 
 import torchvision.transforms as standard_transforms
 import torchvision.utils as vutils
-from tensorboard import SummaryWriter
+#from tensorboardX import SummaryWriter
 from torch import optim
 from torch.autograd import Variable
 from torch.backends import cudnn
+import torch.nn as nn
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader
 
 import utils.transforms as extended_transforms
 from datasets import voc
-from models import *
+from models.fcn32s import *
 from utils import check_mkdir, evaluate, AverageMeter, CrossEntropyLoss2d
 
 cudnn.benchmark = True
 
 ckpt_path = '../../ckpt'
-exp_name = 'voc-fcn8s'
-writer = SummaryWriter(os.path.join(ckpt_path, 'exp', exp_name))
+exp_name = 'voc-fcn32s'
+#writer = SummaryWriter(os.path.join(ckpt_path, 'exp', exp_name))
 
 args = {
     'epoch_num': 300,
-    'lr': 1e-10,
-    'weight_decay': 1e-4,
+    'batch_size': 1,
+    'lr': 1e-4,
+    'weight_decay': 1.6e-3,
     'momentum': 0.95,
     'lr_patience': 100,  # large patience denotes fixed lr
     'snapshot': '',  # empty string denotes learning from scratch
@@ -36,7 +38,7 @@ args = {
 
 
 def main(train_args):
-    net = FCN8s(num_classes=voc.num_classes).cuda()
+    net = FCN32VGG(num_classes=voc.num_classes).cuda()
 
     if len(train_args['snapshot']) == 0:
         curr_epoch = 1
@@ -50,6 +52,7 @@ def main(train_args):
                                      'acc': float(split_snapshot[5]), 'acc_cls': float(split_snapshot[7]),
                                      'mean_iu': float(split_snapshot[9]), 'fwavacc': float(split_snapshot[11])}
 
+#    net = nn.DataParallel(net)
     net.train()
 
     mean_std = ([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
@@ -70,18 +73,18 @@ def main(train_args):
     ])
 
     train_set = voc.VOC('train', transform=input_transform, target_transform=target_transform)
-    train_loader = DataLoader(train_set, batch_size=1, num_workers=4, shuffle=True)
+    train_loader = DataLoader(train_set, batch_size=train_args['batch_size'], num_workers=12, shuffle=True)
     val_set = voc.VOC('val', transform=input_transform, target_transform=target_transform)
     val_loader = DataLoader(val_set, batch_size=1, num_workers=4, shuffle=False)
 
     criterion = CrossEntropyLoss2d(size_average=False, ignore_index=voc.ignore_label).cuda()
 
-    optimizer = optim.Adam([
+    optimizer = optim.SGD([
         {'params': [param for name, param in net.named_parameters() if name[-4:] == 'bias'],
          'lr': 2 * train_args['lr']},
         {'params': [param for name, param in net.named_parameters() if name[-4:] != 'bias'],
-         'lr': train_args['lr'], 'weight_decay': train_args['weight_decay']}
-    ], betas=(train_args['momentum'], 0.999))
+         'lr': train_args['lr']}
+    ], momentum=0.9, weight_decay=train_args['weight_decay'])
 
     if len(train_args['snapshot']) > 0:
         optimizer.load_state_dict(torch.load(os.path.join(ckpt_path, exp_name, 'opt_' + train_args['snapshot'])))
@@ -102,26 +105,31 @@ def main(train_args):
 def train(train_loader, net, criterion, optimizer, epoch, train_args):
     train_loss = AverageMeter()
     curr_iter = (epoch - 1) * len(train_loader)
+    print("######################################")
     for i, data in enumerate(train_loader):
         inputs, labels = data
+        print("#################")
+        print(inputs.size(), labels.size())
         assert inputs.size()[2:] == labels.size()[1:]
         N = inputs.size(0)
+        h, w = labels.size()[1:]
         inputs = Variable(inputs).cuda()
         labels = Variable(labels).cuda()
 
         optimizer.zero_grad()
         outputs = net(inputs)
+        print(outputs.size())
         assert outputs.size()[2:] == labels.size()[1:]
         assert outputs.size()[1] == voc.num_classes
 
-        loss = criterion(outputs, labels) / N
+        loss = criterion(outputs, labels) / N / h / w
         loss.backward()
         optimizer.step()
 
         train_loss.update(loss.data[0], N)
 
         curr_iter += 1
-        writer.add_scalar('train_loss', train_loss.avg, curr_iter)
+        #writer.add_scalar('train_loss', train_loss.avg, curr_iter)
 
         if (i + 1) % train_args['print_freq'] == 0:
             print('[epoch %d], [iter %d / %d], [train loss %.5f]' % (
@@ -187,7 +195,7 @@ def validate(val_loader, net, criterion, optimizer, epoch, train_args, restore, 
                                visualize(predictions_pil.convert('RGB'))])
         val_visual = torch.stack(val_visual, 0)
         val_visual = vutils.make_grid(val_visual, nrow=3, padding=5)
-        writer.add_image(snapshot_name, val_visual)
+        #writer.add_image(snapshot_name, val_visual)
 
     print('--------------------------------------------------------------------')
     print('[epoch %d], [val loss %.5f], [acc %.5f], [acc_cls %.5f], [mean_iu %.5f], [fwavacc %.5f]' % (
@@ -199,12 +207,12 @@ def validate(val_loader, net, criterion, optimizer, epoch, train_args, restore, 
 
     print('--------------------------------------------------------------------')
 
-    writer.add_scalar('val_loss', val_loss.avg, epoch)
-    writer.add_scalar('acc', acc, epoch)
-    writer.add_scalar('acc_cls', acc_cls, epoch)
-    writer.add_scalar('mean_iu', mean_iu, epoch)
-    writer.add_scalar('fwavacc', fwavacc, epoch)
-    writer.add_scalar('lr', optimizer.param_groups[1]['lr'], epoch)
+    #writer.add_scalar('val_loss', val_loss.avg, epoch)
+    #writer.add_scalar('acc', acc, epoch)
+    #writer.add_scalar('acc_cls', acc_cls, epoch)
+    #writer.add_scalar('mean_iu', mean_iu, epoch)
+    #writer.add_scalar('fwavacc', fwavacc, epoch)
+    #writer.add_scalar('lr', optimizer.param_groups[1]['lr'], epoch)
 
     net.train()
     return val_loss.avg
